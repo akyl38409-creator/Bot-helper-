@@ -1,15 +1,17 @@
-"""
+"""""
 GroupHelpBot — бот для Telegram-группы
-Платформа: Render.com (Background Worker)
-Библиотека: python-telegram-bot v21
+Платформа: Render.com (Web Service)
 
-Функции:
-  1. Постит правила комментарием под каждым сообщением в группе
-  2. Приветствует новых участников и отправляет правила
+Запускает минимальный HTTP-сервер на порту 10000,
+чтобы Render не завершал процесс из-за отсутствия порта.
+Бот работает параллельно в отдельном потоке.
 """
 
 import os
 import logging
+import threading
+from http.server import HTTPServer, BaseHTTPRequestHandler
+
 from telegram import Update
 from telegram.ext import (
     Application,
@@ -22,12 +24,12 @@ from telegram.ext import (
 from telegram.constants import ParseMode
 
 # ─────────────────────────────────────────────
-#  НАСТРОЙКИ — задаются через переменные окружения на Render
-#  (Environment Variables → BOT_TOKEN и GROUP_ID)
+#  НАСТРОЙКИ (Environment Variables на Render)
 # ─────────────────────────────────────────────
 
 BOT_TOKEN = os.environ["BOT_TOKEN"]
 GROUP_ID  = int(os.environ["GROUP_ID"])
+PORT      = int(os.environ.get("PORT", 10000))  # Render сам задаёт PORT
 
 # ─────────────────────────────────────────────
 #  ТЕКСТ ПРАВИЛ
@@ -54,16 +56,30 @@ logging.basicConfig(
 log = logging.getLogger(__name__)
 
 
-# ─── /id — узнать ID чата ────────────────────────────────────────────────────
+# ─── Фиктивный HTTP-сервер для Render ────────────────────────────────────────
+
+class HealthHandler(BaseHTTPRequestHandler):
+    def do_GET(self):
+        self.send_response(200)
+        self.end_headers()
+        self.wfile.write(b"OK")
+
+    def log_message(self, *args):
+        pass  # отключаем спам в логах от health-check запросов
+
+def run_http_server():
+    server = HTTPServer(("0.0.0.0", PORT), HealthHandler)
+    log.info("HTTP health-check сервер запущен на порту %s", PORT)
+    server.serve_forever()
+
+
+# ─── Команды ─────────────────────────────────────────────────────────────────
 
 async def cmd_id(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     await update.message.reply_text(
         f"Chat ID: <code>{update.effective_chat.id}</code>",
         parse_mode=ParseMode.HTML,
     )
-
-
-# ─── /rules — показать правила вручную ──────────────────────────────────────
 
 async def cmd_rules(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     await update.message.reply_text(RULES_TEXT, parse_mode=ParseMode.HTML)
@@ -120,19 +136,22 @@ async def on_new_member(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
 # ─── Запуск ──────────────────────────────────────────────────────────────────
 
 def main() -> None:
+    # Запускаем HTTP-сервер в фоновом потоке
+    t = threading.Thread(target=run_http_server, daemon=True)
+    t.start()
+
+    # Запускаем бота
     app = Application.builder().token(BOT_TOKEN).build()
 
     app.add_handler(CommandHandler("id", cmd_id))
     app.add_handler(CommandHandler("rules", cmd_rules))
-
     app.add_handler(MessageHandler(
         filters.Chat(GROUP_ID) & filters.TEXT & ~filters.COMMAND,
         on_message,
     ))
-
     app.add_handler(ChatMemberHandler(on_new_member, ChatMemberHandler.CHAT_MEMBER))
 
-    log.info("Бот запущен на Render. GROUP_ID=%s", GROUP_ID)
+    log.info("Бот запущен. GROUP_ID=%s", GROUP_ID)
     app.run_polling(allowed_updates=["message", "chat_member"])
 
 
